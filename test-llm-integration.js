@@ -53,6 +53,11 @@ async function testAccountabilityAgentWithLLM() {
                 message: 'I might visit the doctor sometime next month',
                 expected: false,
                 description: 'Vague future reference'
+            },
+            {
+                message: 'I will check up with the doctor at 2025-09-10',
+                expected: true,
+                description: 'Specific future commitment with date'
             }
         ];
 

@@ -1,7 +1,19 @@
 /**
+ * Accountability Agent fo// Configure Genkit with default model for simplicity
+const ai = genkit({
+  plugins: [
+    // Configure based on environment variable
+    process.env.LLM_PROVIDER === 'openai'
+      ? openAI({ apiKey: process.env.LLM_API_KEY })
+      : vertexAI({
+        projectId: process.env.FIREBASE_PROJECT_ID || 'back-end-testing-6d8a8',
+        location: 'us-central1'
+      }),
+  ],
+});
+
+/**
  * Accountability Agent for Therapy Chat with Genkit Integration
- * 
- * This Cloud Function listens for new user messages in therapy sessions
  * and extracts future-dated commitments using Genkit AI framework.
  * When a commitment is found, it creates a reminder document and schedules
  * an FCM notification using Cloud Tasks.
@@ -40,6 +52,101 @@ const ai = genkit({
       }),
   ],
 });
+
+// Define date parser tool using Genkit tool calling  
+const parseDateTool = ai.defineTool(
+  {
+    name: 'parseCommitmentDate',
+    description: 'Extract and validate future commitment dates from natural language text',
+    inputSchema: z.object({
+      messageText: z.string().describe('The message text to analyze for dates'),
+      currentDate: z.string().describe('Current date in YYYY-MM-DD format for comparison'),
+    }),
+    outputSchema: z.object({
+      hasDate: z.boolean().describe('Whether a future date was found'),
+      dateIso: z.string().optional().describe('Extracted date in YYYY-MM-DD format'),
+      confidence: z.number().describe('Confidence level from 0-1'),
+      extractedPhrase: z.string().optional().describe('The phrase containing the date'),
+    }),
+  },
+  async (input) => {
+    logger.info(`Parsing date from: "${input.messageText}" with current date: ${input.currentDate}`);
+
+    // Date patterns to match
+    const datePatterns = [
+      { regex: /(\d{4}-\d{2}-\d{2})/i, format: 'ISO', confidence: 0.95 },
+      { regex: /(?:on|by|until|before)\s+(\d{4}-\d{2}-\d{2})/i, format: 'ISO_WITH_PREPOSITION', confidence: 0.9 },
+      { regex: /(?:on|by|until|before)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/i, format: 'NATURAL', confidence: 0.8 },
+      { regex: /(?:on|by|until|before)\s+(\d{1,2}\/\d{1,2}\/\d{4})/i, format: 'US_FORMAT', confidence: 0.7 },
+      { regex: /(?:on|by|until|before)\s+(\d{1,2}-\d{1,2}-\d{4})/i, format: 'DASH_FORMAT', confidence: 0.7 },
+    ];
+
+    const currentDate = new Date(input.currentDate + 'T00:00:00.000Z');
+
+    for (const pattern of datePatterns) {
+      const match = input.messageText.match(pattern.regex);
+      if (match) {
+        const dateStr = match[1];
+        const extractedPhrase = match[0];
+
+        try {
+          let parsedDate: Date;
+
+          // Parse based on format
+          switch (pattern.format) {
+            case 'ISO':
+            case 'ISO_WITH_PREPOSITION':
+              parsedDate = new Date(dateStr + 'T00:00:00.000Z');
+              break;
+            case 'NATURAL':
+              parsedDate = new Date(dateStr);
+              break;
+            case 'US_FORMAT':
+              // Convert MM/DD/YYYY to proper date
+              const [month, day, year] = dateStr.split('/');
+              parsedDate = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00.000Z`);
+              break;
+            case 'DASH_FORMAT':
+              // Convert MM-DD-YYYY to proper date
+              const [monthD, dayD, yearD] = dateStr.split('-');
+              parsedDate = new Date(`${yearD}-${monthD.padStart(2, '0')}-${dayD.padStart(2, '0')}T00:00:00.000Z`);
+              break;
+            default:
+              parsedDate = new Date(dateStr);
+          }
+
+          // Validate date is valid and in the future
+          if (isNaN(parsedDate.getTime())) {
+            continue;
+          }
+
+          if (parsedDate <= currentDate) {
+            logger.info(`Date ${parsedDate.toISOString().split('T')[0]} is not in the future`);
+            continue;
+          }
+
+          const dateIso = parsedDate.toISOString().split('T')[0];
+
+          return {
+            hasDate: true,
+            dateIso,
+            confidence: pattern.confidence,
+            extractedPhrase,
+          };
+
+        } catch (error) {
+          logger.warn(`Failed to parse date "${dateStr}": ${error}`);
+          continue;
+        }
+      }
+    }
+
+    return {
+      hasDate: false,
+      confidence: 0,
+    };
+  }
+);
 
 // Initialize Firebase Admin
 // In emulator environment, we don't need real credentials
@@ -128,7 +235,7 @@ async function analyzeMessage(messageContent: string): Promise<{
 }
 
 /**
- * Analyze message using Genkit AI framework
+ * Analyze message using Genkit AI framework with tool calling
  */
 async function analyzeMessageWithGenkit(
   messageContent: string,
@@ -137,67 +244,156 @@ async function analyzeMessageWithGenkit(
   hasCommitment: boolean;
   reminder?: z.infer<typeof CreateReminderSchema>;
 }> {
+  const currentDate = new Date().toISOString().split('T')[0];
+
   const prompt = `
 You are an AI assistant that analyzes therapy chat messages to identify future-dated commitments.
 
-Your task is to:
-1. Determine if the message contains a commitment for a future date
-2. If yes, extract the date (in YYYY-MM-DD format) and the commitment text
-3. Only extract commitments that have specific future dates, not vague references like "soon" or "next week"
+Your task is to determine if the message contains a commitment for a future date. You have access to a date parsing tool that can help extract and validate dates.
+
+When you find a commitment with a specific future date:
+1. Use the parseCommitmentDate tool to extract and validate the date
+2. The message must contain both a commitment/action AND a specific future date
+3. Only consider commitments with specific future dates, not vague references like "soon" or "next week"
 
 Message to analyze: "${messageContent}"
 
-Current date for reference: ${new Date().toISOString().split('T')[0]}
+Current date for reference: ${currentDate}
 
-Please respond with a JSON object:
-- If you find a future-dated commitment: {"hasCommitment": true, "date_iso": "YYYY-MM-DD", "text": "commitment text"}
-- If no commitment found: {"hasCommitment": false}
-
-Only respond with the JSON, nothing else.
+If the message contains a commitment with a specific future date, use the parseCommitmentDate tool. Otherwise, simply state that no commitment was found.
 `;
 
-  // Use simple generate call with Genkit
   const modelName = provider === 'openai' ? 'openai/gpt-4' : 'vertexai/gemini-1.5-flash';
+
   const response = await ai.generate({
     model: modelName,
     prompt,
+    tools: [parseDateTool],
     config: {
-      maxOutputTokens: 200,
+      maxOutputTokens: 300,
       temperature: 0.1,
     },
   });
 
-  logger.info(`Genkit LLM response: ${response.text}`);
+  logger.info(`Genkit tool-enhanced response: ${response.text}`);
 
-  // Parse the JSON response
-  try {
-    const parsed = JSON.parse(response.text);
+  // Parse the AI's text response for commitment information
+  const responseText = response.text.toLowerCase();
 
-    if (parsed.hasCommitment && parsed.date_iso && parsed.text) {
-      // Validate the date
-      const commitmentDate = new Date(parsed.date_iso + 'T00:00:00.000Z');
+  // Check if AI identified a commitment with specific future date
+  if (responseText.includes('commitment') && responseText.includes('specific future date')) {
+    // Extract date in ISO format (YYYY-MM-DD)
+    const dateMatch = response.text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+
+    if (dateMatch) {
+      const dateIso = dateMatch[1];
+
+      // Validate the date is in the future
+      const commitmentDate = new Date(dateIso + 'T00:00:00.000Z');
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
       if (commitmentDate <= today) {
-        logger.warn(`Commitment date ${parsed.date_iso} is not in the future`);
+        logger.warn(`Commitment date ${dateIso} is not in the future`);
         return { hasCommitment: false };
       }
+
+      // Extract commitment text from original message
+      let commitmentText = messageContent.trim();
+
+      // Try to extract just the commitment part if possible
+      const commitmentPatterns = [
+        /I will (.+?)(?:\s+on|\s+by|\s+in|\s+at|\s*$)/i,
+        /My goal is to (.+?)(?:\s+on|\s+by|\s+in|\s+at|\s*$)/i,
+        /I plan to (.+?)(?:\s+on|\s+by|\s+in|\s+at|\s*$)/i,
+        /I'm going to (.+?)(?:\s+on|\s+by|\s+in|\s+at|\s*$)/i,
+      ];
+
+      for (const pattern of commitmentPatterns) {
+        const match = messageContent.match(pattern);
+        if (match) {
+          commitmentText = match[1].trim();
+          break;
+        }
+      }
+
+      logger.info(`Extracted commitment: "${commitmentText}" for date: ${dateIso}`);
 
       return {
         hasCommitment: true,
         reminder: {
-          date_iso: parsed.date_iso,
-          text: parsed.text,
+          date_iso: dateIso,
+          text: commitmentText,
         },
       };
     }
-
-    return { hasCommitment: false };
-  } catch (parseError) {
-    logger.warn(`Failed to parse Genkit response as JSON: ${response.text}`);
-    throw parseError;
   }
+
+  // Check if the model made tool calls and extract results (backup method)
+  if (response.toolRequests && response.toolRequests.length > 0) {
+    logger.info(`Genkit made ${response.toolRequests.length} tool call(s)`);
+
+    // Find successful date parsing tool results
+    for (const toolRequest of response.toolRequests) {
+      if (toolRequest.toolRequest.name === 'parseCommitmentDate') {
+        logger.info(`Date parsing tool request: ${JSON.stringify(toolRequest.toolRequest)}`);
+
+        // Check if there's a tool response with successful parsing
+        if (toolRequest.toolResponse) {
+          logger.info(`Date parsing tool response: ${JSON.stringify(toolRequest.toolResponse)}`);
+
+          try {
+            // Access the tool result data - Genkit toolResponse structure
+            const toolResult = (toolRequest.toolResponse as any).output;
+
+            if (toolResult && toolResult.success && toolResult.dateIso) {
+              // Validate the date is in the future
+              const commitmentDate = new Date(toolResult.dateIso + 'T00:00:00.000Z');
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+
+              if (commitmentDate <= today) {
+                logger.warn(`Commitment date ${toolResult.dateIso} is not in the future`);
+                return { hasCommitment: false };
+              }
+
+              // Extract commitment text from original message
+              let commitmentText = messageContent.trim();
+
+              // Try to extract just the commitment part if possible
+              const commitmentPatterns = [
+                /I will (.+?)(?:\s+on|\s+by|\s+in|\s+at|\s*$)/i,
+                /My goal is to (.+?)(?:\s+on|\s+by|\s+in|\s+at|\s*$)/i,
+                /I plan to (.+?)(?:\s+on|\s+by|\s+in|\s+at|\s*$)/i,
+                /I'm going to (.+?)(?:\s+on|\s+by|\s+in|\s+at|\s*$)/i,
+              ];
+
+              for (const pattern of commitmentPatterns) {
+                const match = messageContent.match(pattern);
+                if (match) {
+                  commitmentText = match[1].trim();
+                  break;
+                }
+              }
+
+              return {
+                hasCommitment: true,
+                reminder: {
+                  date_iso: toolResult.dateIso,
+                  text: commitmentText,
+                },
+              };
+            }
+          } catch (error) {
+            logger.warn(`Error parsing tool response: ${error}`);
+          }
+        }
+      }
+    }
+  }
+
+  // No valid tool calls found or no commitments identified
+  return { hasCommitment: false };
 }
 
 /**
