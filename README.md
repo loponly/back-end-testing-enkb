@@ -73,6 +73,23 @@ GOOGLE_APPLICATION_CREDENTIALS=./serviceAccount.json
 
 ## How to Execute the App
 
+# For quick execution:
+
+1. **Start the Firebase emulator:**
+   ```bash
+   firebase emulators:start --only functions,firestore
+   ```
+   
+   This will start:
+   - Functions emulator on `http://127.0.0.1:5001`
+   - Firestore emulator on `http://127.0.0.1:8080`
+   - Emulator UI on `http://127.0.0.1:4000`
+
+2. **Test the LLM integration:**
+   ```bash
+   node test-llm-integration.js
+   ```
+
 ### Method 1: Local Development with Firebase Emulator
 
 1. **Start the Firebase emulator:**
