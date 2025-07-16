@@ -1,8 +1,8 @@
 /**
- * Accountability Agent for Therapy Chat
+ * Accountability Agent for Therapy Chat with Genkit Integration
  * 
  * This Cloud Function listens for new user messages in therapy sessions
- * and extracts future-dated commitments using pattern matching and LLM integration.
+ * and extracts future-dated commitments using Genkit AI framework.
  * When a commitment is found, it creates a reminder document and schedules
  * an FCM notification using Cloud Tasks.
  */
@@ -22,6 +22,24 @@ import { createHash } from "crypto";
 import * as z from "zod";
 import type { Request, Response } from "express";
 import type { FirestoreEvent } from "firebase-functions/v2/firestore";
+
+// Genkit imports
+import { genkit } from "genkit";
+import { vertexAI } from "@genkit-ai/vertexai";
+import { openAI } from "genkitx-openai";
+
+// Configure Genkit with default model for simplicity
+const ai = genkit({
+  plugins: [
+    // Configure based on environment variable
+    process.env.LLM_PROVIDER === 'openai'
+      ? openAI({ apiKey: process.env.LLM_API_KEY })
+      : vertexAI({
+        projectId: process.env.FIREBASE_PROJECT_ID || 'back-end-testing-6d8a8',
+        location: 'us-central1'
+      }),
+  ],
+});
 
 // Initialize Firebase Admin
 // In emulator environment, we don't need real credentials
@@ -87,7 +105,7 @@ function calculateScheduleTime(dateIso: string): Date {
 }
 
 /**
- * Extract commitment information from user message using LLM or pattern matching
+ * Extract commitment information from user message using Genkit
  */
 async function analyzeMessage(messageContent: string): Promise<{
   hasCommitment: boolean;
@@ -99,9 +117,9 @@ async function analyzeMessage(messageContent: string): Promise<{
 
   if (llmProvider && llmApiKey) {
     try {
-      return await analyzeMessageWithLLM(messageContent, llmProvider, llmApiKey);
+      return await analyzeMessageWithGenkit(messageContent, llmProvider);
     } catch (error) {
-      logger.warn("LLM analysis failed, falling back to pattern matching:", error);
+      logger.warn("Genkit analysis failed, falling back to pattern matching:", error);
     }
   }
 
@@ -110,12 +128,11 @@ async function analyzeMessage(messageContent: string): Promise<{
 }
 
 /**
- * Analyze message using LLM API (Vertex AI or OpenAI)
+ * Analyze message using Genkit AI framework
  */
-async function analyzeMessageWithLLM(
+async function analyzeMessageWithGenkit(
   messageContent: string,
-  provider: string,
-  apiKey: string
+  provider: string
 ): Promise<{
   hasCommitment: boolean;
   reminder?: z.infer<typeof CreateReminderSchema>;
@@ -139,63 +156,22 @@ Please respond with a JSON object:
 Only respond with the JSON, nothing else.
 `;
 
-  let response: string;
+  // Use simple generate call with Genkit
+  const modelName = provider === 'openai' ? 'openai/gpt-4' : 'vertexai/gemini-1.5-flash';
+  const response = await ai.generate({
+    model: modelName,
+    prompt,
+    config: {
+      maxOutputTokens: 200,
+      temperature: 0.1,
+    },
+  });
 
-  if (provider.toLowerCase() === 'openai') {
-    // OpenAI API call
-    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 200,
-        temperature: 0.1,
-      }),
-    });
-
-    if (!openaiResponse.ok) {
-      throw new Error(`OpenAI API error: ${openaiResponse.statusText}`);
-    }
-
-    const data = await openaiResponse.json();
-    response = data.choices[0].message.content;
-  } else {
-    // Vertex AI API call
-    const vertexResponse = await fetch(
-      `https://us-central1-aiplatform.googleapis.com/v1/projects/${process.env.GCLOUD_PROJECT}/locations/us-central1/publishers/google/models/gemini-1.5-flash:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            maxOutputTokens: 200,
-            temperature: 0.1,
-          },
-        }),
-      }
-    );
-
-    if (!vertexResponse.ok) {
-      throw new Error(`Vertex AI API error: ${vertexResponse.statusText}`);
-    }
-
-    const data = await vertexResponse.json();
-    response = data.candidates[0].content.parts[0].text;
-  }
-
-  logger.info(`LLM response: ${response}`);
+  logger.info(`Genkit LLM response: ${response.text}`);
 
   // Parse the JSON response
   try {
-    const parsed = JSON.parse(response);
+    const parsed = JSON.parse(response.text);
 
     if (parsed.hasCommitment && parsed.date_iso && parsed.text) {
       // Validate the date
@@ -219,11 +195,14 @@ Only respond with the JSON, nothing else.
 
     return { hasCommitment: false };
   } catch (parseError) {
-    logger.warn(`Failed to parse LLM response as JSON: ${response}`);
+    logger.warn(`Failed to parse Genkit response as JSON: ${response.text}`);
     throw parseError;
   }
 }
 
+/**
+ * Analyze message using LLM API (Vertex AI or OpenAI)
+ */
 /**
  * Fallback commitment analysis using simple pattern matching
  */
