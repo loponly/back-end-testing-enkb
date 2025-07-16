@@ -72,3 +72,5 @@ serviceAccount.json
 .dataconnect
 .github/
 .copilot.json
+.vscode/
+docs/

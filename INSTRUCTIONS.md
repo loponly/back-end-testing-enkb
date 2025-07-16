@@ -31,7 +31,7 @@ The Accountability Agent must never write back into the chat thread.
 
 #### LLM analysis
 
-- Pass the message to a provider‑agnostic model (your choice of **ADK, Genkit, LiteLLM, LangChain JSON‑mode, etc.**).
+- Pass the message to a provider‑agnostic model using Genkit
 - Expose one function: `create_reminder(date_iso, text)`.
 - Select the provider with the `LLM_PROVIDER` env var; read the key from `LLM_API_KEY`.
 
