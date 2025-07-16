@@ -65,12 +65,10 @@ node_modules/
 # dotenv environment variables file
 .env
 
-# Service account credentials (contains sensitive data)
-serviceAccount.json
-
 # dataconnect generated files
 .dataconnect
-.github/
-.copilot.json
 .vscode/
 docs/
+serviceAccount.json
+.github/
+.copilot.json
